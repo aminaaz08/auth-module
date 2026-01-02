@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import secrets
 import asyncio
 import os
+from fastapi.security import HTTPBearer
+from bson import ObjectId
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -17,6 +19,8 @@ router = APIRouter()
 # Временное хранилище кодов (в памяти — только для демо)
 verification_codes = {}
 
+# Настройка Bearer-авторизации
+security = HTTPBearer()
 
 async def clear_code_after_delay(email: str, delay: int):
     """Удаляет код через заданное время (в секундах)"""
@@ -35,6 +39,31 @@ def create_access_token(data: dict):
         algorithm=os.getenv("ALGORITHM", "HS256")
     )
 
+asyns  def get_current_user_id(credentials=Depends(security)) -> str:
+    """
+    Извлекает user_id из JWT-токена.
+    Вызывает 401 ошибку, если токен недействителен.
+    """
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token,
+            os.getenv("SECRET_KEY"),
+            algorithm=[os.getenv("ALGORITHM")]
+        )
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Неверный токен"
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED
+            detail="Токен недейтсвителен или просрочен"
+        )
+    return user_id
+
 
 @router.post("/auth/code/request", summary="Запросить одноразовый код")
 async def request_code(user: UserCreate):
@@ -47,7 +76,7 @@ async def request_code(user: UserCreate):
     asyncio.create_task(clear_code_after_delay(email, 300))  # удаляется через 5 минут
 
     # В реальном проекте: отправка через email или Telegram
-    print(f"🔐 Код для {email}: {code_str}")
+    print(f"Код для {email}: {code_str}")
 
     return {"message": "Код отправлен на email (смотри консоль)"}
 
@@ -88,3 +117,29 @@ async def verify_code(request: CodeVerifyRequest):
     access_token = create_access_token(data={"sub": user_id})
 
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.get("/me", summary="Получить данные текущего пользователя")
+async def get_current_user(user_id: str = Depends(get_current_user_id)):
+    """
+    Возвращает данные пользователя по токену.
+    """
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный формат ID пользователя"
+        )
+
+    user = await users_collection.find_one({"_id": ObjectId(user_id)})
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пользователь не найден"
+        )
+
+    return {
+        "id": str(user["_id"]),
+        "email": user["email"],
+        "auth_method": user["auth_method"],
+        "external_id": user["external_id"]
+    }

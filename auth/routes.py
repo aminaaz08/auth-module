@@ -39,7 +39,7 @@ def create_access_token(data: dict):
         algorithm=os.getenv("ALGORITHM", "HS256")
     )
 
-asyns  def get_current_user_id(credentials=Depends(security)) -> str:
+async  def get_current_user_id(credentials=Depends(security)) -> str:
     """
     Извлекает user_id из JWT-токена.
     Вызывает 401 ошибку, если токен недействителен.

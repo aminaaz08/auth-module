@@ -98,7 +98,8 @@ GET /me
 
 json
 ```
-{  "id": "65a...",  
+{
+    "id": "65a...",  
     "email": "user@example.com",  
     "auth_method": "code", // или "github", "yandex"
     "external_id": "email:user@example.com" // или "gh_12345"

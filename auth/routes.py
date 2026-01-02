@@ -272,7 +272,7 @@ async def yandex_login():
         f"https://oauth.yandex.ru/authorize"
         f"?response_type=code"
         f"&client_id={YANDEX_CLIENT_ID}"
-        f"&redirect_uri=http://localhost:8000/auth/yandex/callback"
+        f"&redirect_uri=http://127.0.0.1:8000/auth/yandex/callback"
     )
     return RedirectResponse(yandex_auth_url)
 
@@ -348,5 +348,5 @@ async def yandex_callback(code: str):
 
         # Для демо: показываем токен в Swagger
         return RedirectResponse(
-            url=f"http://localhost:8000/docs?token={jwt_token}"
+            url=f"http://127.0.0.1:8000//docs?token={jwt_token}"
         )

@@ -16,7 +16,6 @@
 - Виртуальное окружение (рекомендуется)
 
 ### 2. Установка
-```bash
 # Клонируйте репозиторий (если ещё не сделано)
 git clone <https://github.com/aminaaz08/auth-module>
 cd auth-module

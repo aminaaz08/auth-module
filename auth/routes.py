@@ -24,6 +24,9 @@ security = HTTPBearer()
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 
+# Яндекс OAuth настройки
+YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID")
+YANDEX_CLIENT_SECRET = os.getenv("YANDEX_CLIENT_SECRET")
 
 def create_access_token(data: dict):
     """Создаёт JWT-токен"""
@@ -252,4 +255,98 @@ async def github_callback(code: str):
         # Для демо: показываем токен в Swagger
         return RedirectResponse(
             url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
+        )
+    
+# === ЯндексID OAuth ===
+
+@router.get("/auth/yandex", summary="Начать вход через ЯндексID")
+async def yandex_login():
+    """Перенаправляет пользователя на Яндекс для авторизации"""
+    if not YANDEX_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="YANDEX_CLIENT_ID не задан в .env"
+        )
+    
+    yandex_auth_url = (
+        f"https://oauth.yandex.ru/authorize"
+        f"?response_type=code"
+        f"&client_id={YANDEX_CLIENT_ID}"
+        f"&redirect_uri=http://localhost:8000/auth/yandex/callback"
+    )
+    return RedirectResponse(yandex_auth_url)
+
+
+@router.get("/auth/yandex/callback", summary="Обработать ответ от ЯндексID")
+async def yandex_callback(code: str):
+    """
+    Обменивает код от Яндекса на access token,
+    получает профиль пользователя и выдаёт JWT.
+    """
+    if not YANDEX_CLIENT_ID or not YANDEX_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Яндекс OAuth не настроен в .env"
+        )
+
+    async with httpx.AsyncClient() as client:
+        # Шаг 1: обмен кода на access token
+        token_response = await client.post(
+            "https://oauth.yandex.ru/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": YANDEX_CLIENT_ID,
+                "client_secret": YANDEX_CLIENT_SECRET,
+            }
+        )
+        token_data = token_response.json()
+
+        if "error" in token_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=token_data.get("error_description", "Ошибка Яндекса")
+            )
+
+        access_token = token_data["access_token"]
+
+        # Шаг 2: получение профиля пользователя
+        user_response = await client.get(
+            "https://login.yandex.ru/info?format=json",
+            headers={"Authorization": f"OAuth {access_token}"}
+        )
+        user_data = user_response.json()
+
+        # Шаг 3: извлечение email и логина
+        email = user_data.get("default_email") or user_data.get("login") + "@yandex.ru"
+        yandex_id = user_data["id"]
+
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Не удалось получить email от Яндекса"
+            )
+
+        # Шаг 4: сохранение/поиск пользователя
+        external_id = f"ya_{yandex_id}"
+        user_in_db = await users_collection.find_one({"external_id": external_id})
+
+        if not user_in_db:
+            new_user = {
+                "email": email,
+                "auth_method": "yandex",
+                "external_id": external_id,
+                "created_at": datetime.utcnow()
+            }
+            result = await users_collection.insert_one(new_user)
+            user_id = str(result.inserted_id)
+        else:
+            user_id = str(user_in_db["_id"])
+
+        # Шаг 5: выдача JWT
+        jwt_token = create_access_token(data={"sub": user_id})
+
+        # Для демо: показываем токен в Swagger
+        return RedirectResponse(
+            url=f"http://localhost:8000/docs?token={jwt_token}"
         )

@@ -1,14 +1,14 @@
 # auth/routes.py
-from fastapi import APIRouter, HTTPException, status
-from auth.models import UserCreate, CodeVerifyRequest  # ← добавлен импорт CodeVerifyRequest
+from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from auth.models import UserCreate, CodeVerifyRequest
 from auth.db import users_collection
 from datetime import datetime, timedelta
-from jose import jwt
+from jose import jwt, JWTError
 from dotenv import load_dotenv
 import secrets
 import asyncio
 import os
-from fastapi.security import HTTPBearer
 from bson import ObjectId
 
 # Загружаем переменные окружения
@@ -21,6 +21,7 @@ verification_codes = {}
 
 # Настройка Bearer-авторизации
 security = HTTPBearer()
+
 
 async def clear_code_after_delay(email: str, delay: int):
     """Удаляет код через заданное время (в секундах)"""
@@ -39,7 +40,10 @@ def create_access_token(data: dict):
         algorithm=os.getenv("ALGORITHM", "HS256")
     )
 
-async  def get_current_user_id(credentials=Depends(security)) -> str:
+
+async def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> str:
     """
     Извлекает user_id из JWT-токена.
     Вызывает 401 ошибку, если токен недействителен.
@@ -49,7 +53,7 @@ async  def get_current_user_id(credentials=Depends(security)) -> str:
         payload = jwt.decode(
             token,
             os.getenv("SECRET_KEY"),
-            algorithm=[os.getenv("ALGORITHM")]
+            algorithms=[os.getenv("ALGORITHM")]
         )
         user_id: str = payload.get("sub")
         if user_id is None:
@@ -59,8 +63,8 @@ async  def get_current_user_id(credentials=Depends(security)) -> str:
             )
     except JWTError:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED
-            detail="Токен недейтсвителен или просрочен"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Токен недействителен или просрочен"
         )
     return user_id
 

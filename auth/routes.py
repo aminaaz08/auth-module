@@ -2,12 +2,11 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from auth.models import UserCreate, CodeVerifyRequest
-from auth.db import users_collection
+from auth.db import users_collection, codes_collection
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from dotenv import load_dotenv
 import secrets
-import asyncio
 import os
 from bson import ObjectId
 
@@ -16,17 +15,8 @@ load_dotenv()
 
 router = APIRouter()
 
-# Временное хранилище кодов (в памяти — только для демо)
-verification_codes = {}
-
 # Настройка Bearer-авторизации
 security = HTTPBearer()
-
-
-async def clear_code_after_delay(email: str, delay: int):
-    """Удаляет код через заданное время (в секундах)"""
-    await asyncio.sleep(delay)
-    verification_codes.pop(email, None)
 
 
 def create_access_token(data: dict):
@@ -71,13 +61,17 @@ async def get_current_user_id(
 
 @router.post("/auth/code/request", summary="Запросить одноразовый код")
 async def request_code(user: UserCreate):
-    """Генерирует и сохраняет 6-значный код для email"""
+    """Генерирует и сохраняет 6-значный код для email в MongoDB"""
     email = user.email
     code = secrets.randbelow(1000000)
     code_str = f"{code:06d}"  # всегда 6 цифр
 
-    verification_codes[email] = code_str
-    asyncio.create_task(clear_code_after_delay(email, 300))  # удаляется через 5 минут
+    # Сохраняем код в MongoDB с отметкой времени
+    await codes_collection.insert_one({
+        "email": email,
+        "code": code_str,
+        "created_at": datetime.utcnow()
+    })
 
     # В реальном проекте: отправка через email или Telegram
     print(f"Код для {email}: {code_str}")
@@ -87,16 +81,21 @@ async def request_code(user: UserCreate):
 
 @router.post("/auth/code/verify", summary="Подтвердить код и получить токен")
 async def verify_code(request: CodeVerifyRequest):
-    """Проверяет код и выдаёт JWT-токен"""
+    """Проверяет код из MongoDB и выдаёт JWT-токен"""
     email = request.email
     code = request.code
-    expected_code = verification_codes.get(email)
 
-    if not expected_code or expected_code != code:
+    # Ищем код в MongoDB
+    stored_code = await codes_collection.find_one({"email": email, "code": code})
+
+    if not stored_code:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Неверный или просроченный код"
         )
+
+    # Удаляем использованный код (повышает безопасность)
+    await codes_collection.delete_one({"_id": stored_code["_id"]})
 
     # Формируем уникальный идентификатор
     external_id = f"email:{email}"

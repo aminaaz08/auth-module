@@ -1,5 +1,6 @@
 # auth/routes.py
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from auth.models import UserCreate, CodeVerifyRequest
 from auth.db import users_collection, codes_collection
@@ -8,6 +9,7 @@ from jose import jwt, JWTError
 from dotenv import load_dotenv
 import secrets
 import os
+import httpx
 from bson import ObjectId
 
 # Загружаем переменные окружения
@@ -17,6 +19,10 @@ router = APIRouter()
 
 # Настройка Bearer-авторизации
 security = HTTPBearer()
+
+# GitHub OAuth настройки
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 
 
 def create_access_token(data: dict):
@@ -146,3 +152,104 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)):
         "auth_method": user["auth_method"],
         "external_id": user["external_id"]
     }
+
+
+# === GitHub OAuth ===
+
+@router.get("/auth/github", summary="Начать вход через GitHub")
+async def github_login():
+    """Перенаправляет пользователя на GitHub для авторизации"""
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GITHUB_CLIENT_ID не задан в .env"
+        )
+    
+    github_auth_url = (
+        f"https://github.com/login/oauth/authorize"
+        f"?client_id={GITHUB_CLIENT_ID}"
+        f"&redirect_uri=http://localhost:8000/auth/github/callback"
+        f"&scope=user:email"
+    )
+    return RedirectResponse(github_auth_url)
+
+
+@router.get("/auth/github/callback", summary="Обработать ответ от GitHub")
+async def github_callback(code: str):
+    """
+    Обменивает код от GitHub на access token,
+    получает профиль пользователя и выдаёт JWT.
+    """
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="GitHub OAuth не настроен в .env"
+        )
+
+    async with httpx.AsyncClient() as client:
+        # Шаг 1: обмен кода на access token
+        token_response = await client.post(
+            "https://github.com/login/oauth/access_token",
+            data={
+                "client_id": GITHUB_CLIENT_ID,
+                "client_secret": GITHUB_CLIENT_SECRET,
+                "code": code,
+            },
+            headers={"Accept": "application/json"}
+        )
+        token_data = token_response.json()
+
+        if "error" in token_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=token_data.get("error_description", "Ошибка GitHub")
+            )
+
+        access_token = token_data["access_token"]
+
+        # Шаг 2: получение профиля пользователя
+        user_response = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"token {access_token}"}
+        )
+        user_data = user_response.json()
+
+        # Шаг 3: получение email (если не в профиле)
+        email = user_data.get("email")
+        if not email:
+            emails_response = await client.get(
+                "https://api.github.com/user/emails",
+                headers={"Authorization": f"token {access_token}"}
+            )
+            emails = emails_response.json()
+            email = next((e["email"] for e in emails if e["primary"]), None)
+
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Не удалось получить email от GitHub"
+            )
+
+        # Шаг 4: сохранение/поиск пользователя
+        external_id = f"gh_{user_data['id']}"
+        user_in_db = await users_collection.find_one({"external_id": external_id})
+
+        if not user_in_db:
+            new_user = {
+                "email": email,
+                "auth_method": "github",
+                "external_id": external_id,
+                "created_at": datetime.utcnow()
+            }
+            result = await users_collection.insert_one(new_user)
+            user_id = str(result.inserted_id)
+        else:
+            user_id = str(user_in_db["_id"])
+
+        # Шаг 5: выдача JWT
+        jwt_token = create_access_token(data={"sub": user_id})
+
+        # Для демо: показываем токен в Swagger
+        return RedirectResponse(
+            url=f"http://localhost:8000/docs?token={jwt_token}"
+        )

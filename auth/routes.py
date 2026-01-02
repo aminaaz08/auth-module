@@ -168,7 +168,7 @@ async def github_login():
     github_auth_url = (
         f"https://github.com/login/oauth/authorize"
         f"?client_id={GITHUB_CLIENT_ID}"
-        f"&redirect_uri=http://localhost:8000/auth/github/callback"
+        f"&redirect_uri=http://127.0.0.1:8000/auth/github/callback"
         f"&scope=user:email"
     )
     return RedirectResponse(github_auth_url)
@@ -251,5 +251,5 @@ async def github_callback(code: str):
 
         # Для демо: показываем токен в Swagger
         return RedirectResponse(
-            url=f"http://localhost:8000/docs?token={jwt_token}"
+            url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
         )

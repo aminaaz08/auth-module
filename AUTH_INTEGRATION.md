@@ -52,8 +52,6 @@ YANDEX_CLIENT_ID=ваш_yandex_client_id
 YANDEX_CLIENT_SECRET=ваш_yandex_client_secret
 ```
 Совет: для генерации SECRET_KEY можно использовать:
-
-python
 ```
 import secrets
 print(secrets.token_hex(32))

@@ -78,3 +78,16 @@ uvicorn main:app --reload
 - Модуль тестов: используйте id из /me для привязки результатов.
 
 Подробная инструкция: `AUTH_INTEGRATION.md`
+
+#### Структура проекта
+```
+auth-module/
+├── main.py              # Точка входа
+├── .env.example         # Пример файла настроек
+├── requirements.txt     # Зависимости
+├── AUTH_INTEGRATION.md  # Инструкция для команды
+└── auth/                # Логика модуля
+    ├── db.py            # Подключение к MongoDB
+    ├── models.py        # Pydantic-модели
+    └── routes.py        # Эндпоинты
+```

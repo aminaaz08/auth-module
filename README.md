@@ -27,7 +27,7 @@
 #### Установка
 ```bash
 # Клонируйте репозиторий
-git clone https://github.com/ваш-логин/auth-module.git
+git clone https://github.com/aminaaz08/auth-module.git
 cd auth-module
 ```
 #### Виртуальное окружение

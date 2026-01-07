@@ -19,10 +19,12 @@ class UserCreate(BaseModel):
 class CodeVerifyRequest(BaseModel):
     email: str
     code: str
+    roles: Optional[List[str]] = None
 
 class AuthInitRequest(BaseModel):
     provider: Literal["github", "yandex", "code"]  
     entry_token: str  
+    roles: Optional[List[str]] = None
 
 class CodeSubmitRequest(BaseModel):
     code: str

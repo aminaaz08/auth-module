@@ -1,9 +1,9 @@
 # auth/routes.py
 from fastapi import APIRouter, HTTPException, status, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from auth.models import UserCreate, CodeVerifyRequest
-from auth.db import users_collection, codes_collection
+from auth.models import UserCreate, CodeVerifyRequest, AuthInitRequest
+from auth.db import users_collection, codes_collection, sessions_collection
 from datetime import datetime, timedelta
 from jose import jwt, JWTError
 from dotenv import load_dotenv
@@ -27,6 +27,7 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 # Яндекс OAuth настройки
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID")
 YANDEX_CLIENT_SECRET = os.getenv("YANDEX_CLIENT_SECRET")
+
 
 def create_access_token(data: dict):
     """Создаёт JWT-токен"""
@@ -66,6 +67,57 @@ async def get_current_user_id(
             detail="Токен недействителен или просрочен"
         )
     return user_id
+
+
+# === Инициализация авторизации ===
+
+@router.post("/auth/init", summary="Инициировать авторизацию через провайдера")
+async def init_auth(request: AuthInitRequest):
+    """
+    Инициирует авторизацию через GitHub или Яндекс.
+    Принимает entry_token от клиента и возвращает ссылку для перехода.
+    """
+    # Проверяем, что провайдер поддерживается
+    if request.provider not in ["github", "yandex"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Неподдерживаемый провайдер"
+        )
+    
+    # Генерируем expires_at (текущее время + 5 минут)
+    expires_at = datetime.utcnow() + timedelta(minutes=5)
+    
+    # Сохраняем сессию в MongoDB
+    session_data = {
+        "entry_token": request.entry_token,
+        "provider": request.provider,
+        "expires_at": expires_at,
+        "status": "pending"
+    }
+    await sessions_collection.insert_one(session_data)
+    
+    # Формируем ссылку в зависимости от провайдера
+    if request.provider == "github":
+        auth_url = (
+            f"https://github.com/login/oauth/authorize"
+            f"?client_id={GITHUB_CLIENT_ID}"
+            f"&redirect_uri=http://127.0.0.1:8000/auth/github/callback"
+            f"&state={request.entry_token}"  # КЛЮЧЕВОЙ ПАРАМЕТР
+            f"&scope=user:email"
+        )
+    else:  # yandex
+        auth_url = (
+            f"https://oauth.yandex.ru/authorize"
+            f"?response_type=code"
+            f"&client_id={YANDEX_CLIENT_ID}"
+            f"&redirect_uri=http://127.0.0.1:8000/auth/yandex/callback"
+            f"&state={request.entry_token}"  # КЛЮЧЕВОЙ ПАРАМЕТР
+        )
+    
+    return {
+        "auth_url": auth_url,
+        "expires_in": 300  # 5 минут в секундах
+    }
 
 
 @router.post("/auth/code/request", summary="Запросить одноразовый код")
@@ -178,7 +230,7 @@ async def github_login():
 
 
 @router.get("/auth/github/callback", summary="Обработать ответ от GitHub")
-async def github_callback(code: str):
+async def github_callback(code: str, state: str = None):
     """
     Обменивает код от GitHub на access token,
     получает профиль пользователя и выдаёт JWT.
@@ -189,6 +241,16 @@ async def github_callback(code: str):
             detail="GitHub OAuth не настроен в .env"
         )
 
+    # Если есть state, ищем сессию
+    session = None
+    if state:
+        session = await sessions_collection.find_one({
+            "entry_token": state,
+            "provider": "github",
+            "status": "pending",
+            "expires_at": {"$gt": datetime.utcnow()}
+        })
+    
     async with httpx.AsyncClient() as client:
         # Шаг 1: обмен кода на access token
         token_response = await client.post(
@@ -203,6 +265,12 @@ async def github_callback(code: str):
         token_data = token_response.json()
 
         if "error" in token_data:
+            # Обновляем статус сессии, если есть
+            if session:
+                await sessions_collection.update_one(
+                    {"_id": session["_id"]},
+                    {"$set": {"status": "denied"}}
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=token_data.get("error_description", "Ошибка GitHub")
@@ -252,10 +320,36 @@ async def github_callback(code: str):
         # Шаг 5: выдача JWT
         jwt_token = create_access_token(data={"sub": user_id})
 
+        # Обновляем сессию, если есть
+        if session:
+            await sessions_collection.update_one(
+                {"_id": session["_id"]},
+                {
+                    "$set": {
+                        "status": "granted",
+                        "access_token": jwt_token,
+                        "user_email": email
+                    }
+                }
+            )
+
         # Для демо: показываем токен в Swagger
-        return RedirectResponse(
-            url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
-        )
+        if session:
+            # Если есть сессия - возвращаем HTML страницу
+            return HTMLResponse(f"""
+            <html>
+                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+                    <h1>✅ Авторизация успешна!</h1>
+                    <p>Вернитесь в приложение для продолжения.</p>
+                    <small>Сессия: {state}</small>
+                </body>
+            </html>
+            """)
+        else:
+            # Старое поведение для прямого вызова
+            return RedirectResponse(
+                url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
+            )
     
 # === ЯндексID OAuth ===
 
@@ -272,13 +366,13 @@ async def yandex_login():
         f"https://oauth.yandex.ru/authorize"
         f"?response_type=code"
         f"&client_id={YANDEX_CLIENT_ID}"
-        f"&redirect_uri=http://127.0.0.1:8000/docs/auth/yandex/callback"
+        f"&redirect_uri=http://127.0.0.1:8000/auth/yandex/callback"
     )
     return RedirectResponse(yandex_auth_url)
 
 
 @router.get("/auth/yandex/callback", summary="Обработать ответ от ЯндексID")
-async def yandex_callback(code: str):
+async def yandex_callback(code: str, state: str = None):
     """
     Обменивает код от Яндекса на access token,
     получает профиль пользователя и выдаёт JWT.
@@ -289,6 +383,16 @@ async def yandex_callback(code: str):
             detail="Яндекс OAuth не настроен в .env"
         )
 
+    # Если есть state, ищем сессию
+    session = None
+    if state:
+        session = await sessions_collection.find_one({
+            "entry_token": state,
+            "provider": "yandex",
+            "status": "pending",
+            "expires_at": {"$gt": datetime.utcnow()}
+        })
+    
     async with httpx.AsyncClient() as client:
         # Шаг 1: обмен кода на access token
         token_response = await client.post(
@@ -303,6 +407,12 @@ async def yandex_callback(code: str):
         token_data = token_response.json()
 
         if "error" in token_data:
+            # Обновляем статус сессии, если есть
+            if session:
+                await sessions_collection.update_one(
+                    {"_id": session["_id"]},
+                    {"$set": {"status": "denied"}}
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=token_data.get("error_description", "Ошибка Яндекса")
@@ -346,7 +456,33 @@ async def yandex_callback(code: str):
         # Шаг 5: выдача JWT
         jwt_token = create_access_token(data={"sub": user_id})
 
+        # Обновляем сессию, если есть
+        if session:
+            await sessions_collection.update_one(
+                {"_id": session["_id"]},
+                {
+                    "$set": {
+                        "status": "granted",
+                        "access_token": jwt_token,
+                        "user_email": email
+                    }
+                }
+            )
+
         # Для демо: показываем токен в Swagger
-        return RedirectResponse(
-            url=f"http://127.0.0.1:8000//docs?token={jwt_token}"
-        )
+        if session:
+            # Если есть сессия - возвращаем HTML страницу
+            return HTMLResponse(f"""
+            <html>
+                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+                    <h1>✅ Авторизация успешна!</h1>
+                    <p>Вернитесь в приложение для продолжения.</p>
+                    <small>Сессия: {state}</small>
+                </body>
+            </html>
+            """)
+        else:
+            # Старое поведение для прямого вызова
+            return RedirectResponse(
+                url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
+            )

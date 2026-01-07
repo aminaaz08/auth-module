@@ -2,6 +2,7 @@
 from pydantic import BaseModel
 from pydantic.functional_validators import AfterValidator
 from typing import Annotated
+from typing import Literal
 import re
 
 def validate_email(email: str) -> str:
@@ -19,4 +20,6 @@ class CodeVerifyRequest(BaseModel):
     email: str
     code: str
 
-    
+class AuthInitRequest(BaseModel):
+    provider: Literal["github", "yandex"]  
+    entry_token: str  

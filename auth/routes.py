@@ -134,66 +134,28 @@ async def init_auth(request: AuthInitRequest):
         "expires_in": 300  # 5 минут в секундах
     }
 
-# === Обновление токена ===
-@router.post("/auth/refresh", summary="Обновить access token")
-async def refresh_token(refresh_token_str: str):
-    """
-    Обновляет access token с использованием refresh token
-    """
+@router.post("/auth/code/request", summary="Запросить одноразовый код")
+async def request_code(user: UserCreate):
+    """Генерирует и сохраняет 6-значный код для email в MongoDB"""
+    email = user.email
+    code = secrets.randbelow(1000000)
+    code_str = f"{code:06d}"  # всегда 6 цифр
+
+    # Отладочный вывод: начало операции
+    print(f"⏳ Пытаюсь сохранить код в MongoDB для {email}...")
+
     try:
-        payload = jwt.decode(refresh_token_str, SECRET_KEY, algorithms=[ALGORITHM])
-        token_type = payload.get("type")
-        if token_type != "refresh":
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Требуется refresh token"
-            )
-        
-        user_id = payload.get("sub")
-        email = payload.get("email")
-        if not user_id or not email:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Неверный refresh token"
-            )
-        
-        # Проверяем, что refresh token есть в базе
-        user = await users_collection.find_one({
-            "_id": ObjectId(user_id),
-            "refresh_tokens": refresh_token_str
+        # Сохраняем код в MongoDB с отметкой времени
+        result = await codes_collection.insert_one({
+            "email": email,
+            "code": code_str,
+            "created_at": datetime.utcnow()
         })
-        
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Refresh token недействителен"
-            )
-        
-        # Генерируем новые токены
-        new_access_token = create_access_token(data={"sub": user_id})
-        new_refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
-        
-        # Обновляем refresh token в базе (два отдельных запроса!)
-        await users_collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$pull": {"refresh_tokens": refresh_token_str}}
-        )
-        await users_collection.update_one(
-            {"_id": ObjectId(user_id)},
-            {"$addToSet": {"refresh_tokens": new_refresh_token}}
-        )
-        
-        return {
-            "access_token": new_access_token,
-            "refresh_token": new_refresh_token,
-            "token_type": "bearer"
-        }
-        
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token недействителен или просрочен"
-        )
+        # Отладочный вывод: успех
+        print(f"✅ Код успешно сохранён в MongoDB! ID документа: {result.inserted_id}")
+    except Exception as e:
+        # Отладочный вывод: ошибка
+        print(f"❌ ОШИБКА при сохранении в MongoDB: {str(e)}")
 
 @router.post("/auth/code/verify", summary="Подтвердить код и получить токен")
 async def verify_code(request: CodeVerifyRequest):
@@ -676,15 +638,14 @@ async def yandex_callback(code: str = None, state: str = None, error: str = None
                 url=f"http://127.0.0.1:8000/docs?token={access_token_jwt}"
             )
 
-
 # === Обновление токена ===
 @router.post("/auth/refresh", summary="Обновить access token")
-async def refresh_token(refresh_token: str):
+async def refresh_token(refresh_token_str: str):
     """
     Обновляет access token с использованием refresh token
     """
     try:
-        payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(refresh_token_str, SECRET_KEY, algorithms=[ALGORITHM])
         token_type = payload.get("type")
         if token_type != "refresh":
             raise HTTPException(
@@ -703,7 +664,7 @@ async def refresh_token(refresh_token: str):
         # Проверяем, что refresh token есть в базе
         user = await users_collection.find_one({
             "_id": ObjectId(user_id),
-            "refresh_tokens": refresh_token
+            "refresh_tokens": refresh_token_str
         })
         
         if not user:
@@ -716,13 +677,14 @@ async def refresh_token(refresh_token: str):
         new_access_token = create_access_token(data={"sub": user_id})
         new_refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
         
-        # Обновляем refresh token в базе
+        # Обновляем refresh token в базе (два отдельных запроса!)
         await users_collection.update_one(
             {"_id": ObjectId(user_id)},
-            {
-                "$pull": {"refresh_tokens": refresh_token},
-                "$addToSet": {"refresh_tokens": new_refresh_token}
-            }
+            {"$pull": {"refresh_tokens": refresh_token_str}}
+        )
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$addToSet": {"refresh_tokens": new_refresh_token}}
         )
         
         return {

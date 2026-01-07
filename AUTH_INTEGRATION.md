@@ -190,6 +190,7 @@ auth-module/
 ├── requirements.txt     # зависимости
 ├── AUTH_INTEGRATION.md  # эта инструкция
 └── auth/
+    ├── _init__.py       # Пустой файл для импортирования модулей из этой папки
     ├── db.py            # подключение к MongoDB
     ├── models.py        # Pydantic-модели
     └── routes.py        # все эндпоинты

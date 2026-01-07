@@ -27,7 +27,7 @@
 #### Установка
 ```bash
 # Клонируйте репозиторий
-git clone https://github.com/ваш-логин/auth-module.git
+git clone https://github.com/aminaaz08/auth-module.git
 cd auth-module
 ```
 #### Виртуальное окружение
@@ -83,11 +83,13 @@ uvicorn main:app --reload
 ```
 auth-module/
 ├── main.py              # Точка входа
-├── .env.example         # Пример файла настроек
+├── .env                 # Файл настроек
 ├── requirements.txt     # Зависимости
 ├── AUTH_INTEGRATION.md  # Инструкция для команды
 └── auth/                # Логика модуля
+    ├── _init__.py       # Пустой файл для импортирования модулей из этой папки
     ├── db.py            # Подключение к MongoDB
     ├── models.py        # Pydantic-модели
-    └── routes.py        # Эндпоинты
+    ├── routes.py        # Эндпоинты
+    └── utils.py         # Общие вспомогательные утилиты и зависимости
 ```

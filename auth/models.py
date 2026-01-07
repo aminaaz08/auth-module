@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from pydantic.functional_validators import AfterValidator
 from typing import Annotated
 from typing import Literal
+from typing import List, Optional
 import re
 
 def validate_email(email: str) -> str:

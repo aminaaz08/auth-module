@@ -153,9 +153,18 @@ async def request_code(user: UserCreate):
         })
         # Отладочный вывод: успех
         print(f"✅ Код успешно сохранён в MongoDB! ID документа: {result.inserted_id}")
+        print(f"🔐 Код для {email}: {code_str}")  # Код теперь точно виден
+
     except Exception as e:
         # Отладочный вывод: ошибка
         print(f"❌ ОШИБКА при сохранении в MongoDB: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Не удалось сохранить код в базу данных"
+        )
+
+    # 🔑 ОБЯЗАТЕЛЬНЫЙ RETURN — иначе будет null
+    return {"message": "Код отправлен на email (смотри консоль)"}
 
 @router.post("/auth/code/verify", summary="Подтвердить код и получить токен")
 async def verify_code(request: CodeVerifyRequest):

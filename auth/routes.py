@@ -142,15 +142,28 @@ async def request_code(user: UserCreate):
     code = secrets.randbelow(1000000)
     code_str = f"{code:06d}"  # всегда 6 цифр
 
-    # Сохраняем код в MongoDB с отметкой времени
-    await codes_collection.insert_one({
-        "email": email,
-        "code": code_str,
-        "created_at": datetime.utcnow()
-    })
+    # Отладочный вывод: начало операции
+    print(f"⏳ Пытаюсь сохранить код в MongoDB для {email}...")
+
+    try:
+        # Сохраняем код в MongoDB с отметкой времени
+        result = await codes_collection.insert_one({
+            "email": email,
+            "code": code_str,
+            "created_at": datetime.utcnow()
+        })
+        # Отладочный вывод: успех
+        print(f"✅ Код успешно сохранён в MongoDB! ID документа: {result.inserted_id}")
+    except Exception as e:
+        # Отладочный вывод: ошибка
+        print(f"❌ ОШИБКА при сохранении в MongoDB: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Не удалось сохранить код в базу данных"
+        )
 
     # В реальном проекте: отправка через email или Telegram
-    print(f"Код для {email}: {code_str}")
+    print(f"🔑 Код для {email}: {code_str}")
 
     return {"message": "Код отправлен на email (смотри консоль)"}
 

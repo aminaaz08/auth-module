@@ -36,7 +36,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440)
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 
-def create_access_token( dict):
+def create_access_token( data):
     """Создаёт JWT-токен доступа"""
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -44,7 +44,7 @@ def create_access_token( dict):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def create_refresh_token( dict):
+def create_refresh_token( data):
     """Создаёт JWT-токен обновления"""
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
@@ -482,7 +482,7 @@ async def github_callback(code: str = None, state: str = None, error: str = None
         )
         token_data = token_response.json()
 
-        if "error" in token_
+        if "error" in token_data:
             # Обновляем статус сессии, если есть
             if session:
                 await sessions_collection.update_one(
@@ -680,7 +680,7 @@ async def yandex_callback(code: str = None, state: str = None, error: str = None
         )
         token_data = token_response.json()
 
-        if "error" in token_
+        if "error" in token_data:
             # Обновляем статус сессии, если есть
             if session:
                 await sessions_collection.update_one(

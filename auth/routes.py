@@ -1,6 +1,6 @@
 # auth/routes.py
 from fastapi import APIRouter, HTTPException, status, Depends, Request
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from auth.models import UserCreate, CodeVerifyRequest, AuthInitRequest
 from auth.db import users_collection, codes_collection, sessions_collection
@@ -11,6 +11,7 @@ import secrets
 import os
 import httpx
 from bson import ObjectId
+import random
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -28,17 +29,27 @@ GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID")
 YANDEX_CLIENT_SECRET = os.getenv("YANDEX_CLIENT_SECRET")
 
+# Конфигурация токенов
+SECRET_KEY = os.getenv("SECRET_KEY", "my_super_secret_key_for_jwt_123")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440))
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
 
 def create_access_token(data: dict):
-    """Создаёт JWT-токен"""
+    """Создаёт JWT-токен доступа"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 1440)))
-    to_encode.update({"exp": expire})
-    return jwt.encode(
-        to_encode,
-        os.getenv("SECRET_KEY", "my_super_secret_key_for_jwt_123"),
-        algorithm=os.getenv("ALGORITHM", "HS256")
-    )
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire, "type": "access"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(data: dict):
+    """Создаёт JWT-токен обновления"""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 async def get_current_user_id(
@@ -50,11 +61,14 @@ async def get_current_user_id(
     """
     token = credentials.credentials
     try:
-        payload = jwt.decode(
-            token,
-            os.getenv("SECRET_KEY"),
-            algorithms=[os.getenv("ALGORITHM")]
-        )
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        token_type = payload.get("type")
+        if token_type != "access":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Требуется токен доступа"
+            )
+        
         user_id: str = payload.get("sub")
         if user_id is None:
             raise HTTPException(
@@ -92,7 +106,8 @@ async def init_auth(request: AuthInitRequest):
         "entry_token": request.entry_token,
         "provider": request.provider,
         "expires_at": expires_at,
-        "status": "pending"
+        "status": "pending",
+        "created_at": datetime.utcnow()
     }
     await sessions_collection.insert_one(session_data)
     
@@ -165,11 +180,21 @@ async def verify_code(request: CodeVerifyRequest):
     user_in_db = await users_collection.find_one({"external_id": external_id})
 
     if not user_in_db:
-        # Создаём нового пользователя
+        # Создаём нового пользователя с именем "Аноним+номер"
+        last_anon = await users_collection.find_one(
+            {"name": {"$regex": "^Аноним"}},
+            sort=[("anon_id", -1)]
+        )
+        next_id = (last_anon["anon_id"] + 1) if last_anon else 1
+        
         new_user = {
+            "name": f"Аноним{next_id}",
             "email": email,
             "auth_method": "code",
             "external_id": external_id,
+            "roles": ["Студент"],
+            "refresh_tokens": [],
+            "anon_id": next_id,
             "created_at": datetime.utcnow()
         }
         result = await users_collection.insert_one(new_user)
@@ -177,10 +202,21 @@ async def verify_code(request: CodeVerifyRequest):
     else:
         user_id = str(user_in_db["_id"])
 
-    # Генерируем JWT
+    # Генерируем JWT токены
     access_token = create_access_token(data={"sub": user_id})
+    refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
+    
+    # Сохраняем refresh token в базу
+    await users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$addToSet": {"refresh_tokens": refresh_token}}
+    )
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer"
+    }
 
 
 @router.get("/me", summary="Получить данные текущего пользователя")
@@ -203,7 +239,9 @@ async def get_current_user(user_id: str = Depends(get_current_user_id)):
 
     return {
         "id": str(user["_id"]),
+        "name": user.get("name", user["email"].split("@")[0]),
         "email": user["email"],
+        "roles": user.get("roles", ["Студент"]),
         "auth_method": user["auth_method"],
         "external_id": user["external_id"]
     }
@@ -230,11 +268,37 @@ async def github_login():
 
 
 @router.get("/auth/github/callback", summary="Обработать ответ от GitHub")
-async def github_callback(code: str, state: str = None):
+async def github_callback(code: str = None, state: str = None, error: str = None):
     """
     Обменивает код от GitHub на access token,
     получает профиль пользователя и выдаёт JWT.
     """
+    # Обработка ошибки от провайдера
+    if error == "access_denied":
+        if state:
+            await sessions_collection.update_one(
+                {"entry_token": state, "provider": "github"},
+                {"$set": {"status": "denied"}}
+            )
+        return HTMLResponse(f"""
+        <html>
+            <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background-color: #f8f9fa;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                    <h1 style="color: #dc3545;">❌ Доступ запрещён</h1>
+                    <p style="font-size: 1.1em; margin: 20px 0;">Пользователь отказался от авторизации</p>
+                    <p>Вернитесь в приложение для повторной попытки.</p>
+                    <small style="color: #6c757d; margin-top: 20px; display: block;">Сессия: {state or 'не указана'}</small>
+                </div>
+            </body>
+        </html>
+        """)
+    
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Отсутствует код авторизации"
+        )
+    
     if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -250,6 +314,11 @@ async def github_callback(code: str, state: str = None):
             "status": "pending",
             "expires_at": {"$gt": datetime.utcnow()}
         })
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Неверный или просроченный state"
+            )
     
     async with httpx.AsyncClient() as client:
         # Шаг 1: обмен кода на access token
@@ -259,6 +328,7 @@ async def github_callback(code: str, state: str = None):
                 "client_id": GITHUB_CLIENT_ID,
                 "client_secret": GITHUB_CLIENT_SECRET,
                 "code": code,
+                "state": state  # GitHub требует передачи state здесь тоже!
             },
             headers={"Accept": "application/json"}
         )
@@ -306,10 +376,21 @@ async def github_callback(code: str, state: str = None):
         user_in_db = await users_collection.find_one({"external_id": external_id})
 
         if not user_in_db:
+            # Генерация имени "Аноним+номер" и роли "Студент"
+            last_anon = await users_collection.find_one(
+                {"name": {"$regex": "^Аноним"}},
+                sort=[("anon_id", -1)]
+            )
+            next_id = (last_anon["anon_id"] + 1) if last_anon else 1
+            
             new_user = {
+                "name": f"Аноним{next_id}",
                 "email": email,
                 "auth_method": "github",
                 "external_id": external_id,
+                "roles": ["Студент"],
+                "refresh_tokens": [],
+                "anon_id": next_id,
                 "created_at": datetime.utcnow()
             }
             result = await users_collection.insert_one(new_user)
@@ -317,8 +398,15 @@ async def github_callback(code: str, state: str = None):
         else:
             user_id = str(user_in_db["_id"])
 
-        # Шаг 5: выдача JWT
-        jwt_token = create_access_token(data={"sub": user_id})
+        # Шаг 5: выдача JWT токенов
+        access_token_jwt = create_access_token(data={"sub": user_id})
+        refresh_token_jwt = create_refresh_token(data={"sub": user_id, "email": email})
+        
+        # Сохраняем refresh token в базу
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$addToSet": {"refresh_tokens": refresh_token_jwt}}
+        )
 
         # Обновляем сессию, если есть
         if session:
@@ -327,30 +415,36 @@ async def github_callback(code: str, state: str = None):
                 {
                     "$set": {
                         "status": "granted",
-                        "access_token": jwt_token,
+                        "access_token": access_token_jwt,
+                        "refresh_token": refresh_token_jwt,
                         "user_email": email
                     }
                 }
             )
 
-        # Для демо: показываем токен в Swagger
+        # Возвращаем HTML страницу для клиента
         if session:
-            # Если есть сессия - возвращаем HTML страницу
             return HTMLResponse(f"""
             <html>
-                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-                    <h1>✅ Авторизация успешна!</h1>
-                    <p>Вернитесь в приложение для продолжения.</p>
-                    <small>Сессия: {state}</small>
+                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background-color: #f8f9fa;">
+                    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                        <h1 style="color: #28a745;">✅ Авторизация успешна!</h1>
+                        <p style="font-size: 1.1em; margin: 20px 0;">Вы успешно вошли через GitHub</p>
+                        <p>Вернитесь в приложение для продолжения.</p>
+                        <div style="background: #e9ecef; padding: 15px; border-radius: 5px; margin-top: 20px; font-family: monospace; font-size: 0.9em;">
+                            Сессия: {state}
+                        </div>
+                    </div>
                 </body>
             </html>
             """)
         else:
             # Старое поведение для прямого вызова
             return RedirectResponse(
-                url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
+                url=f"http://127.0.0.1:8000/docs?token={access_token_jwt}"
             )
-    
+
+
 # === ЯндексID OAuth ===
 
 @router.get("/auth/yandex", summary="Начать вход через ЯндексID")
@@ -372,11 +466,37 @@ async def yandex_login():
 
 
 @router.get("/auth/yandex/callback", summary="Обработать ответ от ЯндексID")
-async def yandex_callback(code: str, state: str = None):
+async def yandex_callback(code: str = None, state: str = None, error: str = None):
     """
     Обменивает код от Яндекса на access token,
     получает профиль пользователя и выдаёт JWT.
     """
+    # Обработка ошибки от провайдера
+    if error == "access_denied":
+        if state:
+            await sessions_collection.update_one(
+                {"entry_token": state, "provider": "yandex"},
+                {"$set": {"status": "denied"}}
+            )
+        return HTMLResponse(f"""
+        <html>
+            <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background-color: #f8f9fa;">
+                <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                    <h1 style="color: #dc3545;">❌ Доступ запрещён</h1>
+                    <p style="font-size: 1.1em; margin: 20px 0;">Пользователь отказался от авторизации</p>
+                    <p>Вернитесь в приложение для повторной попытки.</p>
+                    <small style="color: #6c757d; margin-top: 20px; display: block;">Сессия: {state or 'не указана'}</small>
+                </div>
+            </body>
+        </html>
+        """)
+    
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Отсутствует код авторизации"
+        )
+    
     if not YANDEX_CLIENT_ID or not YANDEX_CLIENT_SECRET:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -392,6 +512,11 @@ async def yandex_callback(code: str, state: str = None):
             "status": "pending",
             "expires_at": {"$gt": datetime.utcnow()}
         })
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Неверный или просроченный state"
+            )
     
     async with httpx.AsyncClient() as client:
         # Шаг 1: обмен кода на access token
@@ -402,6 +527,7 @@ async def yandex_callback(code: str, state: str = None):
                 "code": code,
                 "client_id": YANDEX_CLIENT_ID,
                 "client_secret": YANDEX_CLIENT_SECRET,
+                # Для Яндекса state не передаётся здесь
             }
         )
         token_data = token_response.json()
@@ -442,10 +568,21 @@ async def yandex_callback(code: str, state: str = None):
         user_in_db = await users_collection.find_one({"external_id": external_id})
 
         if not user_in_db:
+            # Генерация имени "Аноним+номер" и роли "Студент"
+            last_anon = await users_collection.find_one(
+                {"name": {"$regex": "^Аноним"}},
+                sort=[("anon_id", -1)]
+            )
+            next_id = (last_anon["anon_id"] + 1) if last_anon else 1
+            
             new_user = {
+                "name": f"Аноним{next_id}",
                 "email": email,
                 "auth_method": "yandex",
                 "external_id": external_id,
+                "roles": ["Студент"],
+                "refresh_tokens": [],
+                "anon_id": next_id,
                 "created_at": datetime.utcnow()
             }
             result = await users_collection.insert_one(new_user)
@@ -453,8 +590,15 @@ async def yandex_callback(code: str, state: str = None):
         else:
             user_id = str(user_in_db["_id"])
 
-        # Шаг 5: выдача JWT
-        jwt_token = create_access_token(data={"sub": user_id})
+        # Шаг 5: выдача JWT токенов
+        access_token_jwt = create_access_token(data={"sub": user_id})
+        refresh_token_jwt = create_refresh_token(data={"sub": user_id, "email": email})
+        
+        # Сохраняем refresh token в базу
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$addToSet": {"refresh_tokens": refresh_token_jwt}}
+        )
 
         # Обновляем сессию, если есть
         if session:
@@ -463,26 +607,92 @@ async def yandex_callback(code: str, state: str = None):
                 {
                     "$set": {
                         "status": "granted",
-                        "access_token": jwt_token,
+                        "access_token": access_token_jwt,
+                        "refresh_token": refresh_token_jwt,
                         "user_email": email
                     }
                 }
             )
 
-        # Для демо: показываем токен в Swagger
+        # Возвращаем HTML страницу для клиента
         if session:
-            # Если есть сессия - возвращаем HTML страницу
             return HTMLResponse(f"""
             <html>
-                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
-                    <h1>✅ Авторизация успешна!</h1>
-                    <p>Вернитесь в приложение для продолжения.</p>
-                    <small>Сессия: {state}</small>
+                <body style="text-align: center; padding: 50px; font-family: Arial, sans-serif; background-color: #f8f9fa;">
+                    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                        <h1 style="color: #28a745;">✅ Авторизация успешна!</h1>
+                        <p style="font-size: 1.1em; margin: 20px 0;">Вы успешно вошли через ЯндексID</p>
+                        <p>Вернитесь в приложение для продолжения.</p>
+                        <div style="background: #e9ecef; padding: 15px; border-radius: 5px; margin-top: 20px; font-family: monospace; font-size: 0.9em;">
+                            Сессия: {state}
+                        </div>
+                    </div>
                 </body>
             </html>
             """)
         else:
             # Старое поведение для прямого вызова
             return RedirectResponse(
-                url=f"http://127.0.0.1:8000/docs?token={jwt_token}"
+                url=f"http://127.0.0.1:8000/docs?token={access_token_jwt}"
             )
+
+
+# === Обновление токена ===
+@router.post("/auth/refresh", summary="Обновить access token")
+async def refresh_token(refresh_token: str):
+    """
+    Обновляет access token с использованием refresh token
+    """
+    try:
+        payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        token_type = payload.get("type")
+        if token_type != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Требуется refresh token"
+            )
+        
+        user_id = payload.get("sub")
+        email = payload.get("email")
+        if not user_id or not email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Неверный refresh token"
+            )
+        
+        # Проверяем, что refresh token есть в базе
+        user = await users_collection.find_one({
+            "_id": ObjectId(user_id),
+            "refresh_tokens": refresh_token
+        })
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token недействителен"
+            )
+        
+        # Генерируем новые токены
+        new_access_token = create_access_token(data={"sub": user_id})
+        new_refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
+        
+        # Обновляем refresh token в базе
+        await users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$pull": {"refresh_tokens": refresh_token},
+                "$addToSet": {"refresh_tokens": new_refresh_token}
+            }
+        )
+        
+        return {
+            "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer"
+        }
+        
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token недействителен или просрочен"
+        )

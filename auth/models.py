@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from pydantic.functional_validators import AfterValidator
 from typing import Annotated
 from typing import Literal
-from typing import List, Optional
 import re
 
 def validate_email(email: str) -> str:
@@ -20,12 +19,10 @@ class UserCreate(BaseModel):
 class CodeVerifyRequest(BaseModel):
     email: str
     code: str
-    roles: Optional[List[str]] = None
 
 class AuthInitRequest(BaseModel):
     provider: Literal["github", "yandex", "code"]  
     entry_token: str  
-    roles: Optional[List[str]] = None
 
 class CodeSubmitRequest(BaseModel):
     code: str

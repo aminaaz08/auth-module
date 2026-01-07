@@ -71,9 +71,7 @@ uvicorn main:app --reload
 | POST          | /auth/code/verify   | Подтвердить код и получить токен                   |
 | POST          | /auth/code/submit   | Подтвердить код с другого устройства (кросс-девайс)|
 | POST          | /auth/refresh       | Обновить access token                              |
-| GET           | /auth/github        | Начать вход через GitHub                     |
-| GET           | /auth/yandex        | Начать вход через ЯндексID                   |
-| GET           | /me                 | Получить данные пользователя (требует токен) |
+| GET           | /me                 | Получить данные пользователя (требует токен)       |
 
 > Полная документация доступна в интерфейсе Swagger: http://localhost:8000/docs
 #### Интеграция

@@ -21,7 +21,7 @@ class CodeVerifyRequest(BaseModel):
     code: str
 
 class AuthInitRequest(BaseModel):
-    provider: Literal["github", "yandex"]  
+    provider: Literal["github", "yandex", "code"]  
     entry_token: str  
 
 class CodeSubmitRequest(BaseModel):

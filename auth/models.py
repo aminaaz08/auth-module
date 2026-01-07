@@ -23,3 +23,7 @@ class CodeVerifyRequest(BaseModel):
 class AuthInitRequest(BaseModel):
     provider: Literal["github", "yandex"]  
     entry_token: str  
+
+class CodeSubmitRequest(BaseModel):
+    code: str
+    refresh_token: str
